@@ -1,7 +1,9 @@
-name: Build Kernel 4.19
+name: Build Kernel (4.9 - spesnd + SukiSU)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 6"
 
 jobs:
   build:
@@ -9,20 +11,115 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 100
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y \
-            git wget curl unzip bc bison flex \
-            libssl-dev build-essential ccache \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi \
+            binutils \
+            make \
+            python3 \
+            libssl-dev \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            unzip \
+            ca-certificates \
+            xz-utils \
+            mkbootimg \
+            cpio \
             device-tree-compiler \
-            python3 xz-utils zip cpio
+            git \
+            git-lfs \
+            curl \
+            wget \
+            zip
 
-      - name: Run build script
+          # Toolchain clang-r547379 (LLVM full)
+          git clone --depth=1 https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git clang-llvm
+
+      - name: Setup KernelSU (SukiSU Ultra)
         run: |
-          chmod +x build.sh
-          ./build.sh
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
+
+      - name: Build Kernel
+        run: |
+          export PATH=$(pwd)/clang-llvm/bin:$PATH
+          make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang"
+          make $KERNEL_CMDLINE CC="ccache clang" -j$(nproc --all) DTC_EXT=dtc
+
+          # Set defconfig if not exists
+          if [ ! -e .config ]; then
+            echo "Setting defconfig..."
+            cp arch/arm64/configs/spesnd_defconfig .config
+          fi
+
+          # Build kernel
+          make -j$(nproc --all) Image.gz dtbo.img
+
+          if [ $? -ne 0 ]; then
+            echo "❌ Build failed."
+            exit 1
+          fi
+
+      - name: Patch Kernel with KPM
+        run: |
+          cd arch/arm64/boot/
+          echo "Downloading patcher..."
+          wget -q https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.0/patch_linux
+          chmod +x patch_linux
+
+          echo "Decompressing Image.gz..."
+          gunzip -f Image.gz
+
+          echo "Running patcher..."
+          ./patch_linux || { echo "❌ Patching failed!" >&2; exit 1; }
+
+          echo "Replacing with patched image..."
+          rm -f Image
+          mv oImage Image
+
+          echo "Recompressing patched Image..."
+          gzip -9 Image
+
+          cd ../../../..
+
+      - name: Package with AnyKernel3
+        run: |
+          # Get kernel release string
+          RELEASE=$(make -j$(nproc --all) kernelrelease)
+
+          # Prepare AnyKernel3
+          if [ -d AnyKernel3 ]; then rm -rf AnyKernel3; fi
+          git clone https://github.com/CHRISL7/AnyKernel3 -b master
+          cd AnyKernel3
+          sed -i "s/kernel.string=.*/kernel.string=$RELEASE/g" anykernel.sh
+          sed -i "s/kernel.compiler=.*/kernel.compiler=\"llvm and clang\"/g" anykernel.sh
+          if ! grep "=m$" ../.config >/dev/null 2>&1; then
+            sed -i "s/do.modules=.*/do.modules=0/g" anykernel.sh
+          fi
+          rm -f README*
+          cd ..
+
+          # Copy results to AnyKernel3
+          cp arch/arm64/boot/Image.gz arch/arm64/boot/dtbo.img AnyKernel3
+
+          # Make flashable zip
+          cd AnyKernel3
+          zip -r9 ../SPESND.zip * -x .git README.md *placeholder
+          cd ..
+
+          echo "✅ Kernel build done. Output: SPESND.zip"
+
+      - name: Upload Kernel Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: SPESND_Flashable_Kernel
+          path: SPESND.zip

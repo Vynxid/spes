@@ -40,7 +40,8 @@ jobs:
             git-lfs \
             curl \
             wget \
-            zip
+            zip \
+            ccache   # ✅ fix: tambahkan ccache
 
           # Toolchain clang-r547379 (LLVM full)
           git clone --depth=1 https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git clang-llvm
